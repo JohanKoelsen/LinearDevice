@@ -1,0 +1,20 @@
+A plan to setup numerical simulations investigating parametric decay instabilities in linear devices.
+
+Re-code 2D bispectral code such that input wavenumber and frequency correspond to the parent wave. This will ensure the validity behind the bicoherence/bispectral value returned.
+Ths plan is the update the data loading structure as well as code performance.
+
+Find the correct parameters for the linear device.
+The magnetic field is known (?) from MagPy.
+Plasma number density? RF intensity? RF frequency? Plasma material?
+
+Hold a meeting discussing under what cirumstances non-monotonic density profiles (or perhaps, different origins to the density perturbations) arise in a linear device - do they exhibit ELMs,
+magnetic islands etc?
+
+Present SMILEI for the group - argue for its inclusion in the group:
+- Easier for setup for Nifflheim
+- Python input
+- Teaching course 8-10 nov
+
+
+
+
