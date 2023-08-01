@@ -13,12 +13,7 @@ import scipy
 from scipy.fft import rfftfreq
 import math
 from tqdm import tqdm
-t1, t2 = 0.8e-7, 2.1e-7
-x1, x2 = -10e-4, 10e-4
-data_pol = ['Ex', 'Ex', 'Ez']
-path = "/home/johan/epoch/scripts/wave_trapping_analysis/PDI/" #os.path.dirname(__file__)
-
-
+import pprint
 
 def sort_files(files_l):
     files_dict = dict()
@@ -40,20 +35,20 @@ def get_files(files, data_pol):
         if not os.path.isdir(file) and file.split('.')[0][-2:] in data_pol:
             files_l.append(file)
     files_dict = sort_files(files_l)
-    print(files_dict)
+    pprint.pprint(files_dict, width=100)
     return files_dict
     
 def load_fields(data_pol, files_dict, path):
     fields = dict()
     time_tot = dict()
+    print('\nLoading in data ...')
     for data_type in list(set(data_pol)):
         fields[data_type] = []
         time_tot = []
-        for file in files_dict[data_type]:
+        for file in tqdm(files_dict[data_type]):
             data = np.load(file)
             field    = data['ElectricField{}'.format(data_type)]
             grid     = data['GridGrid'][0]
-            print('loading in', file[len(path):])
             time     = data['time']
             fields[data_type].extend(field)
             time_tot.extend(time)
@@ -246,7 +241,7 @@ def get_second_cut_space(freqs, ks, f3, k3, f_ele, k_ele, field_k, data_pol):
     
     return cut_field_k, [f2min, f2max], [k2min, k2max]
 
-def compute_bicoherence(vals1, vals2, vals3, field_k, data_pol, bicoherence_boolean=True):
+def compute_bicoherence(vals1, vals2, vals3, field_k, data_pol, freqs, ks, bicoherence_boolean=True):
     k1, f1 = vals1
     k2, f2 = vals2
     k3, f3 = vals3
@@ -279,48 +274,98 @@ def compute_bicoherence(vals1, vals2, vals3, field_k, data_pol, bicoherence_bool
         field_val /= (norm1 * norm2)
         
     return field_val
+
+
+def plot_field(ks, freqs, field):
+    plt.figure()
+    plt.pcolormesh(ks, freqs, field)
+    plt.xlabel(r'$k$ [mm]')
+    plt.ylabel(r'$f$ [GHz]')
+    plt.colorbar()
+    
+
+def create_fancy_window(text, horizontal_char="-", vertical_char="|", border_width=1, use_bold=True):
+    bold_code = "\033[1m" if use_bold else ""
+    reset_code = "\033[0m"
+
+    lines = text.splitlines()
+    max_length = max(len(line) for line in lines)
+
+    # Create the top border
+    top_border = '\n\n' + horizontal_char * (max_length + 2 * border_width)
+    result = [top_border]
+
+    # Create the middle part with text and borders
+    for line in lines:
+        padding = " " * (max_length - len(line) + 2)
+        bordered_line = f"{vertical_char}{bold_code} {line}{padding}{reset_code}{vertical_char}"
+        result.append(bordered_line)
+
+    # Create the bottom border
+    bottom_border = horizontal_char * (max_length + 2 * border_width)
+    result.append(bottom_border)
+
+    return "\n".join(result)
+
+
+
 #%%
 
-fields, time_tot, grid = load_in_data_master(data_pol, path)
+t1, t2 = 0.8e-7, 1.4e-7
+x1, x2 = -10e-4, 10e-4
+data_pol = ['Ex', 'Ex', 'Ez']
+path = "/home/johan/epoch/scripts/wave_trapping_analysis/PDI/" #os.path.dirname(__file__)
 
-#%% 
-pos_eles = get_pos_elements(x1, x2, grid)
-time_eles = get_time_elements(t1, t2, time_tot)
+def load_in_data():
+    fields, time_tot, grid = load_in_data_master(data_pol, path)
 
-fields, time_tot, grid = cut_fields(time_eles, pos_eles, time_tot, grid, fields, data_pol)
+    text=f"""
+    Simulation paramerters:
+        
+    Length of grid: {len(grid)}
+    grid min/max: {grid[0]}, {grid[-1]}
+    
+    Length of time: {len(time_tot)}
+    time min/max: {time_tot[0]}, {time_tot[-1]}
+    """
+    
+    fancy_window = create_fancy_window(text, horizontal_char="-", vertical_char="|", border_width=2)
+    print(fancy_window)
+    return fields, time_tot, grid
 
+
+def compute_bispectrum(fields, time_tot, grid):
+    
+    pos_eles = get_pos_elements(x1, x2, grid)
+    time_eles = get_time_elements(t1, t2, time_tot)
+    fields, time_tot, grid = cut_fields(time_eles, pos_eles, time_tot, grid, fields, data_pol)
+
+    Nsegments = 10
+    Noverlap = 0.5
+    t_starts, t_ends = get_STFT_time_ele(time_tot, Nsegments, Noverlap)
+
+
+    freqs, ks, field_k = cut_FFT_fields(time_tot, fields, grid, t_starts, t_ends, data_pol)
+    plot_field(ks, freqs, np.log10(abs(field_k['Ex'][-1].T)),)
+    
+    del fields
+
+
+    fi = [60e9, 80e9]
+    ki = [-0.4, 0.4]
+    cut_field_k1, k_ele, f_ele = get_cut_space(freqs, ks, fi, ki, field_k, data_pol)
+    
+    f3 = 140.00e9
+    k3 = 0.01
+    
+    k2, f2 = get_second_cut_space(freqs, ks, f3, k3, f_ele, k_ele, field_k, data_pol)
+
+    
+    field_val = compute_bicoherence([k_ele, f_ele], [k2, f2], [k3, f3], field_k, data_pol, freqs, ks, True)
+    
+    plot_field(ks[k_ele[0]:k_ele[1]], freqs[f_ele[0]:f_ele[1]], abs(field_val.T))
 
 #%%
-Nsegments = 10
-Noverlap = 0.5
-t_starts, t_ends = get_STFT_time_ele(time_tot, Nsegments, Noverlap)
-
+fields, time_tot, grid = load_in_data()
 #%%
-freqs, ks, field_k = cut_FFT_fields(time_tot, fields, grid, t_starts, t_ends, data_pol)
-del fields
-#%%
-
-plt.figure()
-plt.pcolormesh(ks, freqs, np.log10(abs(field_k['Ex'][0].T)))
-plt.xlabel(r'$k$ [mm]')
-plt.ylabel(r'$f$ [GHz]')
-
-#%%
-fi = [60e9, 80e9]
-ki = [-0.4, 0.4]
-cut_field_k1, k_ele, f_ele = get_cut_space(freqs, ks, fi, ki, field_k, data_pol)
-
-f3 = 140.00e9
-k3 = 0.01
-
-k2, f2 = get_second_cut_space(freqs, ks, f3, k3, f_ele, k_ele, field_k, data_pol)
-
-#%%
-field_val = compute_bicoherence([k_ele, f_ele], [k2, f2], [k3, f3], field_k, data_pol, True)
-
-plt.figure()
-
-plt.pcolormesh(ks[k_ele[0]:k_ele[1]], freqs[f_ele[0]:f_ele[1]], abs(field_val.T))
-plt.colorbar()
-plt.xlabel(r'$k$ [mm]')
-plt.ylabel(r'$f$ [GHz]')
+compute_bispectrum(fields, time_tot, grid)
