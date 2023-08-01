@@ -1,0 +1,326 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+
+import numpy as np
+import sys
+import os
+import glob
+import pyfftw
+import matplotlib.pyplot as plt
+from scipy.interpolate import make_interp_spline
+import scipy
+from scipy.fft import rfftfreq
+import math
+from tqdm import tqdm
+t1, t2 = 0.8e-7, 2.1e-7
+x1, x2 = -10e-4, 10e-4
+data_pol = ['Ex', 'Ex', 'Ez']
+path = "/home/johan/epoch/scripts/wave_trapping_analysis/PDI/" #os.path.dirname(__file__)
+
+
+
+def sort_files(files_l):
+    files_dict = dict()
+    for type_index, data_type in enumerate(list(set(data_pol))):
+        files = []
+        for file_index, file in enumerate(files_l):
+            field_polarisation = file.split('.')[0][-2:]
+            if field_polarisation == data_type:
+                files.append(file)
+        sim_times = [X.split('_')[-2] for X in files]
+        sim_times = [float(X.split('-')[0]) for X in sim_times]
+        files = [x for _, x in sorted(zip(sim_times, files), key=lambda pair: pair[0])]
+        files_dict[data_type] = files
+    return files_dict
+
+def get_files(files, data_pol):
+    files_l = []
+    for file in files:
+        if not os.path.isdir(file) and file.split('.')[0][-2:] in data_pol:
+            files_l.append(file)
+    files_dict = sort_files(files_l)
+    print(files_dict)
+    return files_dict
+    
+def load_fields(data_pol, files_dict, path):
+    fields = dict()
+    time_tot = dict()
+    for data_type in list(set(data_pol)):
+        fields[data_type] = []
+        time_tot = []
+        for file in files_dict[data_type]:
+            data = np.load(file)
+            field    = data['ElectricField{}'.format(data_type)]
+            grid     = data['GridGrid'][0]
+            print('loading in', file[len(path):])
+            time     = data['time']
+            fields[data_type].extend(field)
+            time_tot.extend(time)
+    return fields, time_tot, grid
+
+def load_in_data_master(data_pol, path):
+    files = glob.glob(path + '/*')
+    files_dict = get_files(files, data_pol)
+    fields, time_tot, grid = load_fields(data_pol, files_dict, path)
+    return fields, time_tot, grid
+    
+
+
+def get_time_elements(t1, t2, time_tot):
+    time_tot = np.array(time_tot)
+    l = np.where((time_tot > t1) & (time_tot < t2))
+    return [l[0][0], l[0][-1]]
+
+def get_pos_elements(x1, x2, grid):
+    grid = np.array(grid)
+    l = np.where((grid > x1) & (grid < x2))
+    return [l[0][0], l[0][-1]]
+
+
+def cut_fields(time_eles, pos_eles, time_tot, grid, fields, data_pol):
+    t1 = int(time_eles[0])
+    t2 = int(time_eles[1])
+    x01 = int(pos_eles[0])
+    x02 = int(pos_eles[1])
+    fields_cut = dict()
+    for data_type in list(set(data_pol)):
+        fields_cut[data_type] = np.array(fields[data_type])[t1:t2, x01:x02]
+    time_tot_cut = np.array(time_tot)[t1:t2]
+    grid_cut = np.array(grid)[x01:x02]
+    return fields_cut, time_tot_cut, grid_cut
+   #fields = np.array(fields[])
+
+
+def interp_and_window_fields(field_segment, time_tot, grid):
+    time_lin = np.linspace(time_tot[0], time_tot[-1], len(time_tot))
+    window_time = scipy.signal.windows.hann(len(time_tot))
+    window_grid = scipy.signal.windows.hann(len(grid))
+    window = np.outer(window_time, window_grid)
+
+    for x0 in range(len(grid)):
+        field_x0 = field_segment[:,x0]
+        bspl = make_interp_spline(time_tot, field_x0, k=5)
+        field_segment[:, x0] = bspl(time_lin)
+        
+        
+    field_segment = window*field_segment
+    
+    return time_lin, field_segment
+def get_STFT_time_ele(time_tot, Nsegments, Noverlap, offset=0):
+    Nelements = len(time_tot)/Nsegments
+    Noverlap_elements = Nelements * Noverlap #0.80 #0.90
+    starts = np.arange(0, len(time_tot), Nelements - Noverlap_elements, dtype=int)
+    starts = starts[starts + Nelements < len(time_tot)]
+    t_start = [time_tot[start] for start in starts]
+    t_end = [time_tot[start + int(Nelements)] for start in starts]
+    return t_start, t_end
+ 
+
+# Returns the cut Fourier Transformed fields of shape (k_cut, frequencies_cut, time_ele)
+def cut_FFT_fields(time_tot, fields, grid, t_starts, t_ends, data_pol):
+    frequencies = []
+    wavenumbers = []
+    field_k = dict()
+    for data_type in data_pol:
+        t_ele = get_time_elements(t_starts[0], t_ends[0], time_tot)
+        field_k[data_type] = np.zeros([len(t_starts), len(grid), (t_ele[1] - t_ele[0])//2 + 1], dtype=np.complex64)
+
+    print('Applying intepolation and window and carrying out 2D FFT for', len(t_starts), 'time elements.')
+    for index, i in enumerate(tqdm(range(len(t_starts)))):
+        field_segment = dict()
+        
+        for data_type in list(set(data_pol)):
+            t_start = t_starts[i]
+            t_end = t_ends[i]
+            
+            t_ele = get_time_elements(t_start, t_end, time_tot)
+            time_segment = time_tot[t_ele[0]:t_ele[-1]]
+            field_segment[data_type] = fields[data_type][t_ele[0]:t_ele[-1], :]
+            time_lin, field_segment[data_type] = interp_and_window_fields(field_segment[data_type], time_segment, grid)
+
+            
+            field_k[data_type][index, :, :] = FFT2Dr_f(field_segment[data_type], threads=1)
+            
+            field_k[data_type][index, :, :] = np.fft.fftshift(field_k[data_type][index, :, :])
+            field_k[data_type][index, :, :] = np.fft.fftshift(field_k[data_type][index, :, :], axes=1)
+
+
+            if index == 0:
+                dt = np.mean(np.diff(time_lin))
+
+                freqs = rfftfreq(len(time_lin), dt)
+                ks = np.fft.fftfreq(field_k[data_type][i].shape[0],d=2)
+                ks = np.fft.fftshift(ks)
+                ks *= 2*np.pi
+                
+    return freqs, ks, field_k
+
+# This function performs the 2D FFT of a field in single precision
+def FFT2Dr_f(a, threads=1):
+
+    # align arrays
+    grid  = int(np.shape(a[0,:])[0])
+    t = int(np.shape(a[:, 0])[0])
+
+    a_in  = pyfftw.empty_aligned((grid, t),    dtype='float32')
+    a_out = pyfftw.empty_aligned((grid, t//2+1),dtype='complex64')
+
+    # plan FFTW
+    fftw_plan = pyfftw.FFTW(a_in, a_out, axes=(0,1),
+                            flags=('FFTW_ESTIMATE',),
+                            direction='FFTW_FORWARD', threads=threads)
+                            
+    # put input array into delta_r and perform FFTW
+    a_in = a.T
+    fftw_plan(a_in, a_out)
+    return a_out
+                   
+
+
+def FFT1Dr_f(a, threads=1):
+    # align arrays
+    grid  = len(a)
+    a_in  = pyfftw.empty_aligned((grid),    dtype='float32')
+    a_out = pyfftw.empty_aligned((grid//2+1),dtype='complex64')
+    # plan FFTW
+    fftw_plan = pyfftw.FFTW(a_in, a_out, axes=(0,),
+                            flags=('FFTW_ESTIMATE',),
+                            direction='FFTW_FORWARD', threads=threads)
+    # put input array into delta_r and perform FFTW
+    a_in = a
+    fftw_plan(a_in, a_out)
+    return a_out
+    
+
+    
+def get_cut_space(freqs, ks, fi, ki, field_k, data_pol):
+    f1, f2 = fi
+    k1, k2 = ki
+    f_ele = get_time_elements(f1, f2, freqs)
+    k_ele = get_pos_elements(k1, k2, ks)
+
+    data_type1 = data_pol[0]
+    field_1 = field_k[data_type1]
+
+    len_time_ele = np.shape(field_1)[0]
+
+    cut_field_k = np.zeros([len_time_ele, k_ele[1] - k_ele[0], f_ele[1] - f_ele[0] ], dtype=np.complex64)
+    for i in range(len_time_ele):
+        cut_field_k[i] = field_1[i, k_ele[0]:k_ele[1], f_ele[0]: f_ele[1]]
+    return cut_field_k, k_ele, f_ele
+
+def find_closest_element(input_value, input_list):
+    closest_element = None
+    min_difference = float('inf')
+
+    for element in input_list:
+        difference = abs(input_value - element)
+        if difference < min_difference:
+            min_difference = difference
+            closest_element = element
+
+    return closest_element
+
+
+
+def get_second_cut_space(freqs, ks, f3, k3, f_ele, k_ele, field_k, data_pol):
+    data_type2 = data_pol[1]
+    field_2 = field_k[data_type2]
+    len_time_ele = np.shape(field_2)[0]
+    f3_ele = np.where(freqs == find_closest_element(f3, freqs))[0][0]
+    k3_ele = np.where(ks == find_closest_element(k3, ks))[0][0]
+    
+
+    f2max = np.where(find_closest_element(f3 - freqs[f_ele[0]], freqs) == freqs)[0][0]
+    f2min = np.where(find_closest_element(f3 - freqs[f_ele[1]], freqs) == freqs)[0][0]
+    
+    k2max = np.where(find_closest_element(k3 - ks[k_ele[0]], ks) == ks)[0][0]
+    k2min = np.where(find_closest_element(k3 - ks[k_ele[1]], ks) == ks)[0][0]
+
+    return [k2min, k2max], [f2min, f2max]
+
+    cut_field_k = np.zeros([len_time_ele, abs(k2max - k2min), abs(f2max - f2min) ], dtype=np.complex64)
+    for i in range(len_time_ele):
+        cut_field_k[i] = field_2[i, k2min:k2max, f2min: f2max]
+    
+    return cut_field_k, [f2min, f2max], [k2min, k2max]
+
+def compute_bicoherence(vals1, vals2, vals3, field_k, data_pol, bicoherence_boolean=True):
+    k1, f1 = vals1
+    k2, f2 = vals2
+    k3, f3 = vals3
+    
+
+    f3_ele = np.where(freqs == find_closest_element(f3, freqs))[0][0]
+    k3_ele = np.where(ks == find_closest_element(k3, ks))[0][0]
+    
+    field_val = np.zeros([abs(k2[0]-k2[1]), abs(f2[0]-f2[1])], dtype=np.complex128)
+    temp = np.zeros(list(np.shape(field_k[data_pol[0]][:, k1[0]:k1[1], f1[0]:f1[1]])), dtype=np.complex128)
+    
+    
+    temp[:] = field_k[data_pol[0]][:, k1[0]:k1[1], f1[0]:f1[1]]*field_k[data_pol[1]][:, k2[0]:k2[1], f2[0]:f2[1]]
+
+
+    if bicoherence_boolean:
+        norm1 = np.mean(abs(temp)**2, axis=0)
+        norm2 = np.mean(abs(np.conjugate(field_k[data_pol[-1]][:, k3_ele, f3_ele]))**2, axis=0)
+    
+        
+    len_time_ele = np.shape(field_k[data_pol[0]])[0]
+    for i in range(len_time_ele):
+        temp[i, :, :] *= np.conjugate(field_k[data_pol[-1]][i, k3_ele, f3_ele])
+    
+    print(temp)
+    field_val += np.mean(temp, axis=0)
+    del temp
+    if bicoherence_boolean:
+        field_val = abs(field_val)**2
+        field_val /= (norm1 * norm2)
+        
+    return field_val
+#%%
+
+fields, time_tot, grid = load_in_data_master(data_pol, path)
+
+#%% 
+pos_eles = get_pos_elements(x1, x2, grid)
+time_eles = get_time_elements(t1, t2, time_tot)
+
+fields, time_tot, grid = cut_fields(time_eles, pos_eles, time_tot, grid, fields, data_pol)
+
+
+#%%
+Nsegments = 10
+Noverlap = 0.5
+t_starts, t_ends = get_STFT_time_ele(time_tot, Nsegments, Noverlap)
+
+#%%
+freqs, ks, field_k = cut_FFT_fields(time_tot, fields, grid, t_starts, t_ends, data_pol)
+del fields
+#%%
+
+plt.figure()
+plt.pcolormesh(ks, freqs, np.log10(abs(field_k['Ex'][0].T)))
+plt.xlabel(r'$k$ [mm]')
+plt.ylabel(r'$f$ [GHz]')
+
+#%%
+fi = [60e9, 80e9]
+ki = [-0.4, 0.4]
+cut_field_k1, k_ele, f_ele = get_cut_space(freqs, ks, fi, ki, field_k, data_pol)
+
+f3 = 140.00e9
+k3 = 0.01
+
+k2, f2 = get_second_cut_space(freqs, ks, f3, k3, f_ele, k_ele, field_k, data_pol)
+
+#%%
+field_val = compute_bicoherence([k_ele, f_ele], [k2, f2], [k3, f3], field_k, data_pol, True)
+
+plt.figure()
+
+plt.pcolormesh(ks[k_ele[0]:k_ele[1]], freqs[f_ele[0]:f_ele[1]], abs(field_val.T))
+plt.colorbar()
+plt.xlabel(r'$k$ [mm]')
+plt.ylabel(r'$f$ [GHz]')
